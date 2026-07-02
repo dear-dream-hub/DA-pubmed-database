@@ -7,6 +7,7 @@ import json
 st.set_page_config(page_title="Weekly Update 대시보드", layout="wide")
 Entrez.email = "your_email@example.com"
 
+# --- 데이터 로드 ---
 @st.cache_data
 def load_data():
     df_kor = pd.read_excel("database.xlsx", sheet_name="한글")
@@ -15,7 +16,8 @@ def load_data():
     df_eng[['팀', '파트', '품목']] = df_eng[['팀', '파트', '품목']].ffill()
     return df_kor, df_eng
 
-def search_pubmed(keyword, days=7, max_results=3):
+# --- 검색 함수: max_results를 9로 상향 조정 ---
+def search_pubmed(keyword, days=7, max_results=9):
     query = f'("{keyword}"[Title/Abstract])'
     try:
         handle = Entrez.esearch(db="pubmed", term=query, reldate=days, datetype="edat", retmax=max_results)
@@ -42,6 +44,7 @@ def search_pubmed(keyword, days=7, max_results=3):
         return papers
     except: return []
 
+# --- AI 분석 함수 ---
 def analyze_paper_with_gemini(api_key, title, abstract, product_name):
     if not abstract: return {"translated_title": "분석 불가", "comment": "Abstract 미등록"}
     genai.configure(api_key=api_key)
@@ -52,6 +55,7 @@ def analyze_paper_with_gemini(api_key, title, abstract, product_name):
         return json.loads(response.text.replace("```json", "").replace("```", "").strip())
     except: return {"translated_title": "분석 실패", "comment": "오류 발생"}
 
+# --- 사이드바 및 UI ---
 with st.sidebar:
     st.header("⚙️ 대시보드 설정")
     gemini_key = st.text_input("🔑 Gemini API Key", type="password")
@@ -65,6 +69,7 @@ st.title(f"📊 {selected_product} Weekly Update")
 
 if st.button("🚀 분석 시작", type="primary"):
     if not gemini_key: st.error("⚠️ API Key가 없습니다!"); st.stop()
+    
     keyword_mapping = []
     for col in ['관련질환', '경쟁성분', '관련계열', '관련품목', '기타']:
         if col in df_eng.columns:
@@ -75,7 +80,8 @@ if st.button("🚀 분석 시작", type="primary"):
     search_results = []
     with st.spinner("PubMed 데이터 수집 중..."):
         for item in keyword_mapping:
-            papers = search_pubmed(item['eng'], days=7 if selected_period=="최근 일주일" else 30)
+            # 3건이 아니라 최대 9건까지 가져오도록 변경
+            papers = search_pubmed(item['eng'], days=7 if selected_period=="최근 일주일" else 30, max_results=9)
             search_results.append({'item': item, 'papers': papers})
 
     active_results = sorted([res for res in search_results if len(res['papers']) > 0], key=lambda x: len(x['papers']), reverse=True)
@@ -85,9 +91,11 @@ if st.button("🚀 분석 시작", type="primary"):
         st.subheader("📈 논문 업데이트 현황")
         for res in active_results:
             with st.expander(f"📂 {res['item']['kor']} ({len(res['papers'])}건)"):
+                # [핵심 수정] 3개씩 묶어서 계속 다음 줄(row)을 생성
                 for i in range(0, len(res['papers']), 3):
+                    row_papers = res['papers'][i : i + 3]
                     cols = st.columns(3)
-                    for idx, paper in enumerate(res['papers'][i : i + 3]):
+                    for idx, paper in enumerate(row_papers):
                         with cols[idx]:
                             with st.container(border=True):
                                 analysis = analyze_paper_with_gemini(gemini_key, paper['title'], paper['abstract'], selected_product)
