@@ -58,14 +58,14 @@ def analyze_paper_with_gemini(api_key, title, abstract, product_name):
         return {"translated_title": "분석 불가", "comment": "Abstract 미등록에 따른 분석 불가"}
     
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    model = genai.GenerativeModel('gemini-2.0-flash') # 모델 버전 업데이트
     
     prompt = f"""
     당신은 제약 바이오 학술 전문가입니다. 다음 논문의 제목과 초록을 읽고, 자사 품목인 '{product_name}'과의 연관성을 분석해주세요.
     논문 제목: {title}
     초록: {abstract}
     
-    반드시 아래 JSON 형식으로만 답변하세요. 다른 설명은 생략하세요.
+    반드시 마크다운 없이 JSON 형식으로만 답변하세요.
     {{
         "translated_title": "논문 제목의 매끄러운 한글 번역",
         "comment": "이 논문이 '{product_name}'의 관점에서 어떤 학술적/임상적 의미가 있는지 분석한 1~2줄의 핵심 코멘트"
@@ -93,7 +93,6 @@ with st.sidebar:
     selected_part = st.selectbox("2. 파트 선택", df_kor[df_kor['팀'] == selected_team]['파트'].dropna().unique())
     selected_product = st.selectbox("3. 품목 선택", df_kor[(df_kor['팀'] == selected_team) & (df_kor['파트'] == selected_part)]['품목'].dropna().unique())
     
-    # 수정사항 4: 기간 설정 추가
     period_map = {"최근 일주일": 7, "최근 한 달": 30}
     selected_period = st.selectbox("4. 기간 설정", list(period_map.keys()))
 
@@ -121,17 +120,25 @@ if st.button(f"🚀 {selected_period} 논문 업데이트 및 AI 분석 시작",
             papers = search_pubmed(item['eng'], days=period_map[selected_period], max_results=3)
             search_results.append({'item': item, 'papers': papers})
             
+    # 정렬: 논문 건수가 많은 순으로
+    sorted_results = sorted(search_results, key=lambda x: len(x['papers']), reverse=True)
+            
     st.markdown("### 📈 키워드별 논문 업데이트 요약")
-    summary_cols = st.columns(len(search_results))
-    for idx, res in enumerate(search_results):
-        with summary_cols[idx]:
-            # 수정사항 1: 한국어(영어) 키워드 표시
-            label_text = f"{res['item']['kor']}\n({res['item']['eng']})"
-            st.metric(label=label_text, value=f"{len(res['papers'])}건")
+    
+    # 5개씩 줄바꿈하여 출력
+    chunk_size = 5
+    for i in range(0, len(sorted_results), chunk_size):
+        chunk = sorted_results[i : i + chunk_size]
+        summary_cols = st.columns(len(chunk))
+        for idx, res in enumerate(chunk):
+            with summary_cols[idx]:
+                # 한글명 / 영문명 / 건수 순 표시
+                label_text = f"{res['item']['kor']}\n({res['item']['eng']})"
+                st.metric(label=label_text, value=f"{len(res['papers'])}건")
     
     st.divider()
     st.markdown("### 📑 AI 분석 리포트")
-    for res in search_results:
+    for res in sorted_results:
         if res['papers']:
             st.markdown(f"#### 📂 {res['item']['category']} : {res['item']['kor']}")
             paper_cols = st.columns(len(res['papers']))
