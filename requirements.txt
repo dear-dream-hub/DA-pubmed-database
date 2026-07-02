@@ -1,5 +1,5 @@
-Bio==1.8.3
-biopython==1.87
-pandas==3.0.3
-protobuf==7.35.1
-streamlit==1.58.0
+streamlit
+pandas
+biopython
+google-generativeai
+openpyxl
