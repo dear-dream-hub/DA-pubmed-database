@@ -4,6 +4,7 @@ from Bio import Entrez
 import google.generativeai as genai
 import json
 
+# --- 기본 설정 ---
 st.set_page_config(page_title="Weekly Update 대시보드", layout="wide")
 Entrez.email = "your_email@example.com"
 
@@ -16,7 +17,7 @@ def load_data():
     df_eng[['팀', '파트', '품목']] = df_eng[['팀', '파트', '품목']].ffill()
     return df_kor, df_eng
 
-# --- 검색 함수: max_results를 9로 상향 조정 ---
+# --- 검색 함수 ---
 def search_pubmed(keyword, days=7, max_results=9):
     query = f'("{keyword}"[Title/Abstract])'
     try:
@@ -44,55 +45,28 @@ def search_pubmed(keyword, days=7, max_results=9):
         return papers
     except: return []
 
-# --- AI 분석 함수 ---
-import google.generativeai as genai
-import json
-
-# 1. 생성 설정에서 JSON 출력 강제 및 Temperature 조정 (안정성 확보)
-generation_config = {
-    "temperature": 0.2,  # 창의성보다는 정합성과 일관성을 위해 낮게 설정
-    "response_mime_type": "application/json",
-}
-
-model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash", # 또는 gemini-1.5-pro
-    generation_config=generation_config
-)
-
-# 2. 구조화된 프롬프트 작성
-prompt = f"""
-당신은 학술 논문 분석 및 번역 전문 AI입니다.
-제공된 영어 논문 텍스트를 바탕으로 다음 두 가지 작업을 수행하고, 반드시 지정된 JSON 규격으로만 출력하세요. 불필요한 인사말이나 서론/결론 문장은 절대 포함하지 마십시오.
-
-[작업 지시]
-1. korean_translation: 학술적이고 전문적인 어조를 유지하며 자연스러운 한국어로 전문 번역하세요.
-2. one_line_summary: 핵심 연구 결과와 임상적/학술적 의의를 명확히 담아 1줄(100자 내외)로 명료하게 요약하세요.
-
-[출력 JSON 규격]
-{{
-  "korean_translation": "한국어 번역 결과 텍스트",
-  "one_line_summary": "1줄 핵심 요약 문장"
-}}
-
-[논문 텍스트]
-{paper_text}
-"""
-
-# API 호출 및 화면 출력
-response = model.generate_content(prompt)
-result = json.loads(response.text)
-
+# --- AI 분석 함수 (JSON 강제 설정 적용) ---
 def analyze_paper_with_gemini(api_key, title, abstract, product_name):
-    if not abstract: return {"translated_title": "분석 불가", "comment": "Abstract 미등록"}
+    if not abstract: 
+        return {"translated_title": "분석 불가", "comment": "Abstract 미등록"}
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.0-flash')
-    prompt = f"논문 제목: {title}\n초록: {abstract}\n'{product_name}' 관점 분석. JSON 응답: {{\"translated_title\": \"...\", \"comment\": \"...\"}}"
+    model = genai.GenerativeModel(
+        model_name='gemini-2.0-flash',
+        generation_config={"response_mime_type": "application/json"}
+    )
+    prompt = f"""
+    논문 제목: {title}
+    초록: {abstract}
+    '{product_name}' 관점에서 학술적 의미를 분석하여 다음 JSON 형식으로만 응답하세요.
+    {{"translated_title": "한글 번역 제목", "comment": "자사 품목 연관성 1~2줄 요약"}}
+    """
     try:
         response = model.generate_content(prompt)
-        return json.loads(response.text.replace("```json", "").replace("```", "").strip())
-    except: return {"translated_title": "분석 실패", "comment": "오류 발생"}
+        return json.loads(response.text)
+    except: 
+        return {"translated_title": "분석 실패", "comment": "API 오류 발생"}
 
-# --- 사이드바 및 UI ---
+# --- 사이드바 ---
 with st.sidebar:
     st.header("⚙️ 대시보드 설정")
     gemini_key = st.text_input("🔑 Gemini API Key", type="password")
@@ -102,10 +76,11 @@ with st.sidebar:
     selected_product = st.selectbox("3. 품목", df_kor[(df_kor['팀'] == selected_team) & (df_kor['파트'] == selected_part)]['품목'].dropna().unique())
     selected_period = st.selectbox("4. 기간", ["최근 일주일", "최근 한 달"])
 
+# --- 메인 로직 ---
 st.title(f"📊 {selected_product} Weekly Update")
 
 if st.button("🚀 분석 시작", type="primary"):
-    if not gemini_key: st.error("⚠️ API Key가 없습니다!"); st.stop()
+    if not gemini_key: st.error("⚠️ API Key를 입력하세요!"); st.stop()
     
     keyword_mapping = []
     for col in ['관련질환', '경쟁성분', '관련계열', '관련품목', '기타']:
@@ -117,18 +92,16 @@ if st.button("🚀 분석 시작", type="primary"):
     search_results = []
     with st.spinner("PubMed 데이터 수집 중..."):
         for item in keyword_mapping:
-            # 3건이 아니라 최대 9건까지 가져오도록 변경
             papers = search_pubmed(item['eng'], days=7 if selected_period=="최근 일주일" else 30, max_results=9)
             search_results.append({'item': item, 'papers': papers})
 
     active_results = sorted([res for res in search_results if len(res['papers']) > 0], key=lambda x: len(x['papers']), reverse=True)
 
-    if not active_results: st.info("데이터가 없습니다.")
+    if not active_results: st.info("업데이트된 논문이 없습니다.")
     else:
         st.subheader("📈 논문 업데이트 현황")
         for res in active_results:
             with st.expander(f"📂 {res['item']['kor']} ({len(res['papers'])}건)"):
-                # [핵심 수정] 3개씩 묶어서 계속 다음 줄(row)을 생성
                 for i in range(0, len(res['papers']), 3):
                     row_papers = res['papers'][i : i + 3]
                     cols = st.columns(3)
