@@ -46,13 +46,16 @@ def search_pubmed(keyword, days=7, max_results=9):
         return papers
     except: return []
 
-# --- AI 분석 함수 (한국어 번역 강제화 및 안전 필터 해제) ---
+# --- AI 분석 함수 (한글 검사 로직 추가) ---
 def analyze_paper_with_gemini(api_key, title, abstract, product_name):
     if not abstract: 
-        return {"translated_title": title, "comment": "Abstract 미등록에 따른 분석 불가"}
+        return {"translated_title": "[초록 미등록] " + title, "comment": "Abstract 미등록에 따른 분석 불가"}
     
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    model = genai.GenerativeModel(
+        model_name='gemini-2.0-flash',
+        generation_config={"response_mime_type": "application/json"}
+    )
     
     safety_settings = {
         'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
@@ -61,43 +64,36 @@ def analyze_paper_with_gemini(api_key, title, abstract, product_name):
         'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE'
     }
     
-    # [수정됨] 한국어로 번역하라는 지시를 매우 강력하게 통제합니다.
     prompt = f"""
-    당신은 의학 논문 번역가이자 제약바이오 학술 전문가입니다. 
-    다음 영어 논문 제목과 초록을 읽고, 반드시 '한국어(한글)'로 번역 및 요약하세요.
-    영어 원문을 그대로 두거나 영어를 섞어 쓰지 마십시오. 무조건 한국어로 번역해야 합니다.
+    당신은 의학 논문 번역가입니다. 아래 영어 논문 제목과 초록을 읽고, 반드시 '한국어(한글)'로 번역 및 요약하세요.
+    경고: translated_title에 영어 원문을 그대로 출력하지 마십시오. 의학 용어라도 최대한 자연스러운 한국어로 번역하십시오.
     
     논문 제목(영어): {title}
     초록(영어): {abstract}
-    자사 품목: {product_name}
 
-    반드시 아래 JSON 형식으로만 답변하세요. 다른 텍스트는 절대 쓰지 마세요.
+    반드시 아래 JSON 형식으로만 답변하세요.
     {{
-        "translated_title": "영문 논문 제목을 한국어(한글)로 매끄럽게 번역한 제목",
-        "comment": "자사 품목 '{product_name}' 관점에서의 학술적/임상적 의미를 한국어로 1~2줄 요약"
+        "translated_title": "(여기에 한국어로 번역된 제목을 작성하세요)",
+        "comment": "자사 품목 '{product_name}' 관점에서의 임상적 의미 한국어 1줄 요약"
     }}
     """
     try:
         response = model.generate_content(prompt, safety_settings=safety_settings)
+        result = json.loads(response.text.strip())
         
-        raw_text = response.text
-        match = re.search(r'\{.*\}', raw_text, re.DOTALL)
-        
-        if match:
-            json_str = match.group(0)
-            result = json.loads(json_str)
+        # [핵심 수정] 결과물에 한글(가-힣)이 전혀 포함되어 있지 않다면 AI가 번역을 거부한 것으로 간주
+        if not result.get("translated_title") or not re.search(r'[가-힣]', result.get("translated_title")):
+            # 일반 텍스트 모드로 강제 2차 번역 실행 (JSON 제약조건 해제)
+            backup_model = genai.GenerativeModel('gemini-2.0-flash')
+            backup_prompt = f"다음 영어 의학 논문 제목을 한국어(한글)로만 번역해서 출력하세요. 영어나 부가 설명은 절대 쓰지 마세요.\n\n제목: {title}"
+            backup_res = backup_model.generate_content(backup_prompt, safety_settings=safety_settings)
             
-            # [수정됨] 2차 방어선에서도 한국어 강제 지시를 명확히 추가했습니다.
-            if not result.get("translated_title") or result.get("translated_title").lower().strip() == title.lower().strip():
-                backup_res = model.generate_content(f"다음 영어 의학 논문 제목을 무조건 한국어(한글)로 번역하세요. 영어 원문을 그대로 출력하면 절대 안 됩니다:\n{title}")
-                result["translated_title"] = backup_res.text.strip("[]\"' \n")
-                
-            return result
-        else:
-            return {"translated_title": title, "comment": "데이터 추출 실패 (형식 오류)"}
+            # 백업 번역 결과 덮어쓰기
+            result["translated_title"] = backup_res.text.strip(" \n\"'[]")
             
+        return result
     except Exception as e: 
-        return {"translated_title": title, "comment": f"분석 오류 (한도 초과 또는 차단)"}
+        return {"translated_title": "번역 확인 필요", "comment": "AI 분석 일시 지연"}
 
 # --- 사이드바 ---
 with st.sidebar:
