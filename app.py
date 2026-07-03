@@ -46,24 +46,24 @@ def search_pubmed(keyword, days=7, max_results=9):
         return papers
     except: return []
 
-# --- AI 분석 함수 (텍스트 파싱 기반으로 안정성 대폭 강화) ---
+# --- AI 분석 함수 (한글 번역 및 파싱 로직 대폭 강화) ---
 def analyze_paper_with_gemini(api_key, title, abstract, product_name):
     if not abstract: 
-        return {"translated_title": title, "comment": "Abstract 미등록에 따른 분석 불가"}
+        return {"translated_title": "[초록 없음] " + title, "comment": "Abstract 미등록에 따른 분석 불가"}
     
     genai.configure(api_key=api_key)
-    # 2.0-flash 모델을 사용하여 빠른 속도 유지
     model = genai.GenerativeModel('gemini-2.0-flash')
     
     prompt = f"""
-    아래 논문 제목과 초록을 읽고 다음 요구사항을 수행하세요.
-    1. 논문 제목을 한국어 학술 용어에 맞게 매끄럽게 한글로 번역하세요.
-    2. 자사 품목인 '{product_name}' 관점에서 이 논문이 가지는 학술적/임상적 의미를 1~2줄로 요약하세요.
+    당신은 제약바이오 학술 전문가이자 의학 전문 번역가입니다. 아래 논문의 제목(영어)과 초록을 읽고 다음 두 가지를 작성하세요.
     
-    답변은 반드시 아래 포맷만 정확히 지켜서 작성하세요. 다른 부연 설명은 절대 하지 마세요.
+    1. 논문 제목(영어)을 한국어 의학/임상 학술 용어에 맞게 자연스럽고 매끄러운 한글로 번역하세요. (절대 영어 그대로 두지 마세요)
+    2. 자사 품목인 '{product_name}' 관점에서 이 논문이 가지는 학술적/임상적 핵심 의미를 1~2줄로 요약하세요.
     
-    제목: [한글 번역 제목]
-    내용: [임상적 의미 요약]
+    반드시 아래의 형식을 정확히 지켜서 응답하세요. 다른 설명은 생략하세요.
+    
+    번역제목: 한글로 번역된 논문 제목
+    요약내용: 임상적 의미 요약문
     
     논문 제목: {title}
     초록: {abstract}
@@ -72,30 +72,42 @@ def analyze_paper_with_gemini(api_key, title, abstract, product_name):
         response = model.generate_content(prompt)
         text = response.text.strip()
         
-        # 정규표현식을 통해 안전하게 대괄호 안의 텍스트만 추출
-        title_match = re.search(r"제목:\s*\[(.*?)\]", text)
-        comment_match = re.search(r"내용:\s*\[(.*?)\]", text)
+        translated_title = ""
+        comment = ""
         
-        translated_title = title_match.group(1).strip() if title_match else ""
-        comment = comment_match.group(1).strip() if comment_match else ""
-        
-        # 정규식 매칭에 실패했을 경우를 위한 2차 방어선 (단순 한 줄씩 분리)
-        if not translated_title or not comment:
-            lines = [line.strip() for line in text.split('\n') if line.strip()]
-            for line in lines:
-                if line.startswith("제목:"):
-                    translated_title = line.replace("제목:", "").replace("[", "").replace("]", "").strip()
-                elif line.startswith("내용:"):
-                    comment = line.replace("내용:", "").replace("[", "").replace("]", "").strip()
-        
-        # 최종 반환 (만약 데이터가 끝까지 비어있다면 원문 및 에러 메시지 매핑)
+        # 줄바꿈 단위로 쪼개어 가장 확실하게 키워드 매칭 파싱
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        for line in lines:
+            # AI가 대괄호 등을 임의로 붙일 경우를 대비해 특수문자 제거 처리 포함
+            if line.startswith("번역제목:") or line.startswith("번역제목"):
+                translated_title = re.sub(r"^번역제목:\s*", "", line)
+                translated_title = translated_title.strip("[]\"' ")
+            elif line.startswith("요약내용:") or line.startswith("요약내용"):
+                comment = re.sub(r"^요약내용:\s*", "", line)
+                comment = comment.strip("[]\"' ")
+                
+        # 만약 한 줄 텍스트 매칭도 안 되었다면 정규식 시도
+        if not translated_title:
+            t_match = re.search(r"번역제목\s*:\s*(.*)", text)
+            if t_match: translated_title = t_match.group(1).strip("[]\"' ")
+            
+        if not comment:
+            c_match = re.search(r"요약내용\s*:\s*(.*)", text)
+            if c_match: comment = c_match.group(1).strip("[]\"' ")
+
+        # 파싱은 성공했으나 번역 결과가 기존 영어 제목과 완전히 똑같거나 비어있는 상황 방어
+        if not translated_title or translated_title.lower() == title.lower():
+            # 3차 방어선: 강제로 제목만 단독 번역 요청
+            direct_prompt = f"다음 영어 의학 논문 제목을 자연스러운 한글로만 번역해서 출력하세요.\n논문 제목: {title}"
+            direct_res = model.generate_content(direct_prompt)
+            translated_title = direct_res.text.strip("[]\"' ")
+
         return {
-            "translated_title": translated_title if translated_title else title,
-            "comment": comment if comment else "핵심 코멘트를 추출하지 못했습니다."
+            "translated_title": translated_title if translated_title else "번역 오류 (원문 확인 요망)",
+            "comment": comment if comment else "임상적 의미 요약 코멘트를 추출하지 못했습니다."
         }
     except Exception as e: 
-        # API 자체 오류나 차단이 발생했을 때 시스템이 다운되지 않도록 방어
-        return {"translated_title": title, "comment": f"AI 분석 오류 (한도 초과 또는 API 차단)"}
+        return {"translated_title": "번역 실패 (API 오류)", "comment": "AI 분석 중 오류가 발생했습니다."}
 
 # --- 사이드바 ---
 with st.sidebar:
@@ -141,7 +153,6 @@ if st.button("🚀 분석 시작", type="primary"):
                             with st.container(border=True):
                                 analysis = analyze_paper_with_gemini(gemini_key, paper['title'], paper['abstract'], selected_product)
                                 
-                                # 기존 요청 디자인 복원
                                 st.markdown(f"**[{paper['pub_type']}]** <span style='background-color:#d1ecf1; color:#0c5460; padding:3px 8px; border-radius:5px; font-size:0.85em; font-weight:bold;'>{res['item']['kor']}</span>", unsafe_allow_html=True)
                                 st.markdown(f"**{paper['title']}** [[🔗PubMed]](https://pubmed.ncbi.nlm.nih.gov/{paper['pmid']}/)")
                                 st.markdown("---")
