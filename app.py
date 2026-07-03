@@ -45,7 +45,6 @@ def search_pubmed(keyword, days=7, max_results=9):
     except: return []
 
 # --- AI 분석 함수 ---
-Python
 import google.generativeai as genai
 import json
 
