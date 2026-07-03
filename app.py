@@ -45,6 +45,44 @@ def search_pubmed(keyword, days=7, max_results=9):
     except: return []
 
 # --- AI 분석 함수 ---
+Python
+import google.generativeai as genai
+import json
+
+# 1. 생성 설정에서 JSON 출력 강제 및 Temperature 조정 (안정성 확보)
+generation_config = {
+    "temperature": 0.2,  # 창의성보다는 정합성과 일관성을 위해 낮게 설정
+    "response_mime_type": "application/json",
+}
+
+model = genai.GenerativeModel(
+    model_name="gemini-1.5-flash", # 또는 gemini-1.5-pro
+    generation_config=generation_config
+)
+
+# 2. 구조화된 프롬프트 작성
+prompt = f"""
+당신은 학술 논문 분석 및 번역 전문 AI입니다.
+제공된 영어 논문 텍스트를 바탕으로 다음 두 가지 작업을 수행하고, 반드시 지정된 JSON 규격으로만 출력하세요. 불필요한 인사말이나 서론/결론 문장은 절대 포함하지 마십시오.
+
+[작업 지시]
+1. korean_translation: 학술적이고 전문적인 어조를 유지하며 자연스러운 한국어로 전문 번역하세요.
+2. one_line_summary: 핵심 연구 결과와 임상적/학술적 의의를 명확히 담아 1줄(100자 내외)로 명료하게 요약하세요.
+
+[출력 JSON 규격]
+{{
+  "korean_translation": "한국어 번역 결과 텍스트",
+  "one_line_summary": "1줄 핵심 요약 문장"
+}}
+
+[논문 텍스트]
+{paper_text}
+"""
+
+# API 호출 및 화면 출력
+response = model.generate_content(prompt)
+result = json.loads(response.text)
+
 def analyze_paper_with_gemini(api_key, title, abstract, product_name):
     if not abstract: return {"translated_title": "분석 불가", "comment": "Abstract 미등록"}
     genai.configure(api_key=api_key)
