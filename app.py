@@ -46,7 +46,7 @@ def search_pubmed(keyword, days=7, max_results=9):
         return papers
     except: return []
 
-# --- AI 분석 함수 (안전 필터 해제 및 파싱 오류 원천 차단) ---
+# --- AI 분석 함수 (한국어 번역 강제화 및 안전 필터 해제) ---
 def analyze_paper_with_gemini(api_key, title, abstract, product_name):
     if not abstract: 
         return {"translated_title": title, "comment": "Abstract 미등록에 따른 분석 불가"}
@@ -54,7 +54,6 @@ def analyze_paper_with_gemini(api_key, title, abstract, product_name):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-2.0-flash')
     
-    # 임상 데이터가 유해 콘텐츠로 오인되어 차단되는 것을 방지합니다.
     safety_settings = {
         'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
         'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
@@ -62,32 +61,35 @@ def analyze_paper_with_gemini(api_key, title, abstract, product_name):
         'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE'
     }
     
+    # [수정됨] 한국어로 번역하라는 지시를 매우 강력하게 통제합니다.
     prompt = f"""
-    당신은 의학 논문 번역가이자 제약바이오 학술 전문가입니다. 다음 논문을 분석하여 매끄러운 한글 번역 제목과 임상적 의미 요약을 제공하세요.
-    논문 제목: {title}
-    초록: {abstract}
+    당신은 의학 논문 번역가이자 제약바이오 학술 전문가입니다. 
+    다음 영어 논문 제목과 초록을 읽고, 반드시 '한국어(한글)'로 번역 및 요약하세요.
+    영어 원문을 그대로 두거나 영어를 섞어 쓰지 마십시오. 무조건 한국어로 번역해야 합니다.
+    
+    논문 제목(영어): {title}
+    초록(영어): {abstract}
     자사 품목: {product_name}
 
     반드시 아래 JSON 형식으로만 답변하세요. 다른 텍스트는 절대 쓰지 마세요.
     {{
-        "translated_title": "자연스러운 한글 번역 제목",
-        "comment": "자사 품목 '{product_name}' 관점에서의 학술적/임상적 의미 1~2줄 요약"
+        "translated_title": "영문 논문 제목을 한국어(한글)로 매끄럽게 번역한 제목",
+        "comment": "자사 품목 '{product_name}' 관점에서의 학술적/임상적 의미를 한국어로 1~2줄 요약"
     }}
     """
     try:
         response = model.generate_content(prompt, safety_settings=safety_settings)
         
         raw_text = response.text
-        # 정규표현식을 이용해 불필요한 문장들을 무시하고 오직 { } 안의 내용만 강제 추출합니다.
         match = re.search(r'\{.*\}', raw_text, re.DOTALL)
         
         if match:
             json_str = match.group(0)
             result = json.loads(json_str)
             
-            # 번역이 안 되고 영어가 그대로 나오는 현상을 대비한 2차 방어선
-            if not result.get("translated_title") or result.get("translated_title").lower() == title.lower():
-                backup_res = model.generate_content(f"다음 영어 의학 논문 제목을 자연스러운 한글로만 번역하세요:\n{title}")
+            # [수정됨] 2차 방어선에서도 한국어 강제 지시를 명확히 추가했습니다.
+            if not result.get("translated_title") or result.get("translated_title").lower().strip() == title.lower().strip():
+                backup_res = model.generate_content(f"다음 영어 의학 논문 제목을 무조건 한국어(한글)로 번역하세요. 영어 원문을 그대로 출력하면 절대 안 됩니다:\n{title}")
                 result["translated_title"] = backup_res.text.strip("[]\"' \n")
                 
             return result
@@ -95,7 +97,6 @@ def analyze_paper_with_gemini(api_key, title, abstract, product_name):
             return {"translated_title": title, "comment": "데이터 추출 실패 (형식 오류)"}
             
     except Exception as e: 
-        # 파싱이 실패하더라도 에러로 멈추지 않고 원문 제목을 반환하여 화면을 유지합니다.
         return {"translated_title": title, "comment": f"분석 오류 (한도 초과 또는 차단)"}
 
 # --- 사이드바 ---
@@ -133,7 +134,6 @@ if st.button("🚀 분석 시작", type="primary"):
     else:
         st.subheader("📈 논문 업데이트 현황")
         for res in active_results:
-            # 펼치기 탭에는 한국어 키워드 (res['item']['kor'])
             with st.expander(f"📂 {res['item']['kor']} ({len(res['papers'])}건)"):
                 for i in range(0, len(res['papers']), 3):
                     row_papers = res['papers'][i : i + 3]
@@ -143,7 +143,6 @@ if st.button("🚀 분석 시작", type="primary"):
                             with st.container(border=True):
                                 analysis = analyze_paper_with_gemini(gemini_key, paper['title'], paper['abstract'], selected_product)
                                 
-                                # 태그에는 영어 키워드 (res['item']['eng'])
                                 st.markdown(f"**[{paper['pub_type']}]** <span style='background-color:#d1ecf1; color:#0c5460; padding:3px 8px; border-radius:5px; font-size:0.85em; font-weight:bold;'>{res['item']['eng']}</span>", unsafe_allow_html=True)
                                 st.markdown(f"**{paper['title']}** [[🔗PubMed]](https://pubmed.ncbi.nlm.nih.gov/{paper['pmid']}/)")
                                 st.markdown("---")
