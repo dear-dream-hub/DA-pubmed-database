@@ -3,6 +3,7 @@ import pandas as pd
 from Bio import Entrez
 import google.generativeai as genai
 import json
+import re
 
 # --- 기본 설정 ---
 st.set_page_config(page_title="Weekly Update 대시보드", layout="wide")
@@ -45,45 +46,57 @@ def search_pubmed(keyword, days=7, max_results=9):
         return papers
     except: return []
 
-# --- AI 분석 함수 (오류 방지를 위한 JSON 강제화 및 2중 구조) ---
+# --- AI 분석 함수 (안전 필터 해제 및 파싱 오류 원천 차단) ---
 def analyze_paper_with_gemini(api_key, title, abstract, product_name):
     if not abstract: 
-        return {"translated_title": "[초록 미등록] " + title, "comment": "Abstract 미등록에 따른 분석 불가"}
+        return {"translated_title": title, "comment": "Abstract 미등록에 따른 분석 불가"}
     
     genai.configure(api_key=api_key)
-    # 완벽한 JSON 출력을 위해 시스템 레벨에서 형식을 강제 지정합니다.
-    model = genai.GenerativeModel(
-        model_name='gemini-2.0-flash',
-        generation_config={"response_mime_type": "application/json"}
-    )
+    model = genai.GenerativeModel('gemini-2.0-flash')
+    
+    # 임상 데이터가 유해 콘텐츠로 오인되어 차단되는 것을 방지합니다.
+    safety_settings = {
+        'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
+        'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
+        'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
+        'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE'
+    }
     
     prompt = f"""
-    당신은 의학 논문 번역가이자 제약바이오 학술 전문가입니다. 다음 논문을 분석하여 의학 용어에 맞는 매끄러운 한글 번역 제목과 임상적 의미 요약을 제공하세요.
-    응답은 반드시 지정된 JSON 포맷을 준수해야 하며, JSON 외의 텍스트를 포함해서는 안 됩니다.
-
+    당신은 의학 논문 번역가이자 제약바이오 학술 전문가입니다. 다음 논문을 분석하여 매끄러운 한글 번역 제목과 임상적 의미 요약을 제공하세요.
     논문 제목: {title}
     초록: {abstract}
     자사 품목: {product_name}
 
-    정확히 다음 JSON 스키마 구조로만 답변하세요:
+    반드시 아래 JSON 형식으로만 답변하세요. 다른 텍스트는 절대 쓰지 마세요.
     {{
-        "translated_title": "논문 제목의 자연스러운 한글 번역 (절대 영어 원문을 그대로 출력하지 마십시오)",
+        "translated_title": "자연스러운 한글 번역 제목",
         "comment": "자사 품목 '{product_name}' 관점에서의 학술적/임상적 의미 1~2줄 요약"
     }}
     """
     try:
-        response = model.generate_content(prompt)
-        result = json.loads(response.text.strip())
+        response = model.generate_content(prompt, safety_settings=safety_settings)
         
-        # 2차 방어: 구조는 만들어졌으나 번역이 누락되어 기존 영어와 같을 경우 예외 처리
-        if not result.get("translated_title") or result.get("translated_title").lower() == title.lower():
-            backup_model = genai.GenerativeModel('gemini-2.0-flash')
-            backup_res = backup_model.generate_content(f"다음 영어 의학 논문 제목을 자연스러운 한글로만 번역하세요. 다른 말은 쓰지 마세요:\n{title}")
-            result["translated_title"] = backup_res.text.strip("[]\"' ")
+        raw_text = response.text
+        # 정규표현식을 이용해 불필요한 문장들을 무시하고 오직 { } 안의 내용만 강제 추출합니다.
+        match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+        
+        if match:
+            json_str = match.group(0)
+            result = json.loads(json_str)
             
-        return result
-    except: 
-        return {"translated_title": "번역 실패 (파싱 오류)", "comment": "AI 분석 중 일시적인 오류가 발생했습니다."}
+            # 번역이 안 되고 영어가 그대로 나오는 현상을 대비한 2차 방어선
+            if not result.get("translated_title") or result.get("translated_title").lower() == title.lower():
+                backup_res = model.generate_content(f"다음 영어 의학 논문 제목을 자연스러운 한글로만 번역하세요:\n{title}")
+                result["translated_title"] = backup_res.text.strip("[]\"' \n")
+                
+            return result
+        else:
+            return {"translated_title": title, "comment": "데이터 추출 실패 (형식 오류)"}
+            
+    except Exception as e: 
+        # 파싱이 실패하더라도 에러로 멈추지 않고 원문 제목을 반환하여 화면을 유지합니다.
+        return {"translated_title": title, "comment": f"분석 오류 (한도 초과 또는 차단)"}
 
 # --- 사이드바 ---
 with st.sidebar:
@@ -120,7 +133,7 @@ if st.button("🚀 분석 시작", type="primary"):
     else:
         st.subheader("📈 논문 업데이트 현황")
         for res in active_results:
-            # st.expander 제목에는 한국어 키워드(res['item']['kor']) 적용
+            # 펼치기 탭에는 한국어 키워드 (res['item']['kor'])
             with st.expander(f"📂 {res['item']['kor']} ({len(res['papers'])}건)"):
                 for i in range(0, len(res['papers']), 3):
                     row_papers = res['papers'][i : i + 3]
@@ -130,7 +143,7 @@ if st.button("🚀 분석 시작", type="primary"):
                             with st.container(border=True):
                                 analysis = analyze_paper_with_gemini(gemini_key, paper['title'], paper['abstract'], selected_product)
                                 
-                                # 문헌 종류 옆의 키워드 마크다운은 영어 키워드(res['item']['eng'])로 변경 적용
+                                # 태그에는 영어 키워드 (res['item']['eng'])
                                 st.markdown(f"**[{paper['pub_type']}]** <span style='background-color:#d1ecf1; color:#0c5460; padding:3px 8px; border-radius:5px; font-size:0.85em; font-weight:bold;'>{res['item']['eng']}</span>", unsafe_allow_html=True)
                                 st.markdown(f"**{paper['title']}** [[🔗PubMed]](https://pubmed.ncbi.nlm.nih.gov/{paper['pmid']}/)")
                                 st.markdown("---")
