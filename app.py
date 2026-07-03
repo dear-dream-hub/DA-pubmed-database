@@ -3,6 +3,7 @@ import pandas as pd
 from Bio import Entrez
 import google.generativeai as genai
 import json
+import re
 
 # --- 기본 설정 ---
 st.set_page_config(page_title="Weekly Update 대시보드", layout="wide")
@@ -45,26 +46,56 @@ def search_pubmed(keyword, days=7, max_results=9):
         return papers
     except: return []
 
-# --- AI 분석 함수 (JSON 강제 설정 적용) ---
+# --- AI 분석 함수 (텍스트 파싱 기반으로 안정성 대폭 강화) ---
 def analyze_paper_with_gemini(api_key, title, abstract, product_name):
     if not abstract: 
-        return {"translated_title": "분석 불가", "comment": "Abstract 미등록"}
+        return {"translated_title": title, "comment": "Abstract 미등록에 따른 분석 불가"}
+    
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(
-        model_name='gemini-2.0-flash',
-        generation_config={"response_mime_type": "application/json"}
-    )
+    # 2.0-flash 모델을 사용하여 빠른 속도 유지
+    model = genai.GenerativeModel('gemini-2.0-flash')
+    
     prompt = f"""
+    아래 논문 제목과 초록을 읽고 다음 요구사항을 수행하세요.
+    1. 논문 제목을 한국어 학술 용어에 맞게 매끄럽게 한글로 번역하세요.
+    2. 자사 품목인 '{product_name}' 관점에서 이 논문이 가지는 학술적/임상적 의미를 1~2줄로 요약하세요.
+    
+    답변은 반드시 아래 포맷만 정확히 지켜서 작성하세요. 다른 부연 설명은 절대 하지 마세요.
+    
+    제목: [한글 번역 제목]
+    내용: [임상적 의미 요약]
+    
     논문 제목: {title}
     초록: {abstract}
-    '{product_name}' 관점에서 학술적 의미를 분석하여 다음 JSON 형식으로만 응답하세요.
-    {{"translated_title": "한글 번역 제목", "comment": "자사 품목 연관성 1~2줄 요약"}}
     """
     try:
         response = model.generate_content(prompt)
-        return json.loads(response.text)
-    except: 
-        return {"translated_title": "분석 실패", "comment": "API 오류 발생"}
+        text = response.text.strip()
+        
+        # 정규표현식을 통해 안전하게 대괄호 안의 텍스트만 추출
+        title_match = re.search(r"제목:\s*\[(.*?)\]", text)
+        comment_match = re.search(r"내용:\s*\[(.*?)\]", text)
+        
+        translated_title = title_match.group(1).strip() if title_match else ""
+        comment = comment_match.group(1).strip() if comment_match else ""
+        
+        # 정규식 매칭에 실패했을 경우를 위한 2차 방어선 (단순 한 줄씩 분리)
+        if not translated_title or not comment:
+            lines = [line.strip() for line in text.split('\n') if line.strip()]
+            for line in lines:
+                if line.startswith("제목:"):
+                    translated_title = line.replace("제목:", "").replace("[", "").replace("]", "").strip()
+                elif line.startswith("내용:"):
+                    comment = line.replace("내용:", "").replace("[", "").replace("]", "").strip()
+        
+        # 최종 반환 (만약 데이터가 끝까지 비어있다면 원문 및 에러 메시지 매핑)
+        return {
+            "translated_title": translated_title if translated_title else title,
+            "comment": comment if comment else "핵심 코멘트를 추출하지 못했습니다."
+        }
+    except Exception as e: 
+        # API 자체 오류나 차단이 발생했을 때 시스템이 다운되지 않도록 방어
+        return {"translated_title": title, "comment": f"AI 분석 오류 (한도 초과 또는 API 차단)"}
 
 # --- 사이드바 ---
 with st.sidebar:
@@ -109,6 +140,8 @@ if st.button("🚀 분석 시작", type="primary"):
                         with cols[idx]:
                             with st.container(border=True):
                                 analysis = analyze_paper_with_gemini(gemini_key, paper['title'], paper['abstract'], selected_product)
+                                
+                                # 기존 요청 디자인 복원
                                 st.markdown(f"**[{paper['pub_type']}]** <span style='background-color:#d1ecf1; color:#0c5460; padding:3px 8px; border-radius:5px; font-size:0.85em; font-weight:bold;'>{res['item']['kor']}</span>", unsafe_allow_html=True)
                                 st.markdown(f"**{paper['title']}** [[🔗PubMed]](https://pubmed.ncbi.nlm.nih.gov/{paper['pmid']}/)")
                                 st.markdown("---")
