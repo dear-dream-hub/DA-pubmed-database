@@ -3,7 +3,6 @@ import pandas as pd
 from Bio import Entrez
 import google.generativeai as genai
 import json
-import re
 
 # --- 기본 설정 ---
 st.set_page_config(page_title="Weekly Update 대시보드", layout="wide")
@@ -46,68 +45,45 @@ def search_pubmed(keyword, days=7, max_results=9):
         return papers
     except: return []
 
-# --- AI 분석 함수 (한글 번역 및 파싱 로직 대폭 강화) ---
+# --- AI 분석 함수 (오류 방지를 위한 JSON 강제화 및 2중 구조) ---
 def analyze_paper_with_gemini(api_key, title, abstract, product_name):
     if not abstract: 
-        return {"translated_title": "[초록 없음] " + title, "comment": "Abstract 미등록에 따른 분석 불가"}
+        return {"translated_title": "[초록 미등록] " + title, "comment": "Abstract 미등록에 따른 분석 불가"}
     
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    # 완벽한 JSON 출력을 위해 시스템 레벨에서 형식을 강제 지정합니다.
+    model = genai.GenerativeModel(
+        model_name='gemini-2.0-flash',
+        generation_config={"response_mime_type": "application/json"}
+    )
     
     prompt = f"""
-    당신은 제약바이오 학술 전문가이자 의학 전문 번역가입니다. 아래 논문의 제목(영어)과 초록을 읽고 다음 두 가지를 작성하세요.
-    
-    1. 논문 제목(영어)을 한국어 의학/임상 학술 용어에 맞게 자연스럽고 매끄러운 한글로 번역하세요. (절대 영어 그대로 두지 마세요)
-    2. 자사 품목인 '{product_name}' 관점에서 이 논문이 가지는 학술적/임상적 핵심 의미를 1~2줄로 요약하세요.
-    
-    반드시 아래의 형식을 정확히 지켜서 응답하세요. 다른 설명은 생략하세요.
-    
-    번역제목: 한글로 번역된 논문 제목
-    요약내용: 임상적 의미 요약문
-    
+    당신은 의학 논문 번역가이자 제약바이오 학술 전문가입니다. 다음 논문을 분석하여 의학 용어에 맞는 매끄러운 한글 번역 제목과 임상적 의미 요약을 제공하세요.
+    응답은 반드시 지정된 JSON 포맷을 준수해야 하며, JSON 외의 텍스트를 포함해서는 안 됩니다.
+
     논문 제목: {title}
     초록: {abstract}
+    자사 품목: {product_name}
+
+    정확히 다음 JSON 스키마 구조로만 답변하세요:
+    {{
+        "translated_title": "논문 제목의 자연스러운 한글 번역 (절대 영어 원문을 그대로 출력하지 마십시오)",
+        "comment": "자사 품목 '{product_name}' 관점에서의 학술적/임상적 의미 1~2줄 요약"
+    }}
     """
     try:
         response = model.generate_content(prompt)
-        text = response.text.strip()
+        result = json.loads(response.text.strip())
         
-        translated_title = ""
-        comment = ""
-        
-        # 줄바꿈 단위로 쪼개어 가장 확실하게 키워드 매칭 파싱
-        lines = [line.strip() for line in text.split('\n') if line.strip()]
-        for line in lines:
-            # AI가 대괄호 등을 임의로 붙일 경우를 대비해 특수문자 제거 처리 포함
-            if line.startswith("번역제목:") or line.startswith("번역제목"):
-                translated_title = re.sub(r"^번역제목:\s*", "", line)
-                translated_title = translated_title.strip("[]\"' ")
-            elif line.startswith("요약내용:") or line.startswith("요약내용"):
-                comment = re.sub(r"^요약내용:\s*", "", line)
-                comment = comment.strip("[]\"' ")
-                
-        # 만약 한 줄 텍스트 매칭도 안 되었다면 정규식 시도
-        if not translated_title:
-            t_match = re.search(r"번역제목\s*:\s*(.*)", text)
-            if t_match: translated_title = t_match.group(1).strip("[]\"' ")
+        # 2차 방어: 구조는 만들어졌으나 번역이 누락되어 기존 영어와 같을 경우 예외 처리
+        if not result.get("translated_title") or result.get("translated_title").lower() == title.lower():
+            backup_model = genai.GenerativeModel('gemini-2.0-flash')
+            backup_res = backup_model.generate_content(f"다음 영어 의학 논문 제목을 자연스러운 한글로만 번역하세요. 다른 말은 쓰지 마세요:\n{title}")
+            result["translated_title"] = backup_res.text.strip("[]\"' ")
             
-        if not comment:
-            c_match = re.search(r"요약내용\s*:\s*(.*)", text)
-            if c_match: comment = c_match.group(1).strip("[]\"' ")
-
-        # 파싱은 성공했으나 번역 결과가 기존 영어 제목과 완전히 똑같거나 비어있는 상황 방어
-        if not translated_title or translated_title.lower() == title.lower():
-            # 3차 방어선: 강제로 제목만 단독 번역 요청
-            direct_prompt = f"다음 영어 의학 논문 제목을 자연스러운 한글로만 번역해서 출력하세요.\n논문 제목: {title}"
-            direct_res = model.generate_content(direct_prompt)
-            translated_title = direct_res.text.strip("[]\"' ")
-
-        return {
-            "translated_title": translated_title if translated_title else "번역 오류 (원문 확인 요망)",
-            "comment": comment if comment else "임상적 의미 요약 코멘트를 추출하지 못했습니다."
-        }
-    except Exception as e: 
-        return {"translated_title": "번역 실패 (API 오류)", "comment": "AI 분석 중 오류가 발생했습니다."}
+        return result
+    except: 
+        return {"translated_title": "번역 실패 (파싱 오류)", "comment": "AI 분석 중 일시적인 오류가 발생했습니다."}
 
 # --- 사이드바 ---
 with st.sidebar:
@@ -144,6 +120,7 @@ if st.button("🚀 분석 시작", type="primary"):
     else:
         st.subheader("📈 논문 업데이트 현황")
         for res in active_results:
+            # st.expander 제목에는 한국어 키워드(res['item']['kor']) 적용
             with st.expander(f"📂 {res['item']['kor']} ({len(res['papers'])}건)"):
                 for i in range(0, len(res['papers']), 3):
                     row_papers = res['papers'][i : i + 3]
@@ -153,7 +130,8 @@ if st.button("🚀 분석 시작", type="primary"):
                             with st.container(border=True):
                                 analysis = analyze_paper_with_gemini(gemini_key, paper['title'], paper['abstract'], selected_product)
                                 
-                                st.markdown(f"**[{paper['pub_type']}]** <span style='background-color:#d1ecf1; color:#0c5460; padding:3px 8px; border-radius:5px; font-size:0.85em; font-weight:bold;'>{res['item']['kor']}</span>", unsafe_allow_html=True)
+                                # 문헌 종류 옆의 키워드 마크다운은 영어 키워드(res['item']['eng'])로 변경 적용
+                                st.markdown(f"**[{paper['pub_type']}]** <span style='background-color:#d1ecf1; color:#0c5460; padding:3px 8px; border-radius:5px; font-size:0.85em; font-weight:bold;'>{res['item']['eng']}</span>", unsafe_allow_html=True)
                                 st.markdown(f"**{paper['title']}** [[🔗PubMed]](https://pubmed.ncbi.nlm.nih.gov/{paper['pmid']}/)")
                                 st.markdown("---")
                                 st.markdown(f"🔖 {analysis.get('translated_title')}")
