@@ -3,6 +3,7 @@ import pandas as pd
 from Bio import Entrez
 import google.generativeai as genai
 import json
+import re
 import time
 
 # --- 기본 설정 ---
@@ -46,32 +47,71 @@ def search_pubmed(keyword, days=7, max_results=9):
         return papers
     except: return []
 
-# --- AI 분석 함수 (초기 성공 버전 프롬프트 및 가공 로직 복원) ---
+# --- AI 분석 함수 (가장 강력하고 안정적인 버전 적용) ---
 def analyze_paper_with_gemini(api_key, title, abstract, product_name):
-    if not abstract:
-        return {"translated_title": "분석 불가", "comment": "Abstract 미등록에 따른 분석 불가"}
+    if not abstract: 
+        return {"translated_title": "[초록 미등록] " + title, "comment": "Abstract 미등록에 따른 분석 불가"}
     
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    model = genai.GenerativeModel('gemini-2.0-flash')
+    
+    # 의학 용어로 인한 안전 필터 차단 방지
+    safety_settings = {
+        'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
+        'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
+        'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
+        'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE'
+    }
     
     prompt = f"""
-    당신은 제약 바이오 학술 전문가입니다. 다음 논문의 제목과 초록을 읽고, 자사 품목인 '{product_name}'과의 연관성을 분석해주세요.
-    논문 제목: {title}
-    초록: {abstract}
+    당신은 의학 논문 번역가입니다. 아래 영어 논문 제목과 초록을 읽고, 반드시 '한국어(한글)'로 번역 및 요약하세요.
+    영어 원문을 그대로 복사하지 마세요.
     
-    반드시 아래 JSON 형식으로만 답변하세요. 다른 설명은 생략하세요.
-    {{
-        "translated_title": "논문 제목의 매끄러운 한글 번역",
-        "comment": "이 논문이 '{product_name}'의 관점에서 어떤 학술적/임상적 의미가 있는지 분석한 1~2줄의 핵심 코멘트"
-    }}
+    논문 제목(영어): {title}
+    초록(영어): {abstract}
+
+    반드시 아래 포맷에 맞춰서 텍스트로만 답변하세요. 다른 부연 설명은 절대 쓰지 마세요.
+    ===
+    번역제목: [한국어(한글)로 매끄럽게 번역된 제목]
+    요약내용: [자사 품목 '{product_name}' 관점에서의 임상적 의미 한국어 1줄 요약]
+    ===
     """
     try:
-        time.sleep(1.5) # 과부하 방지 안심 버퍼
-        response = model.generate_content(prompt)
-        result_text = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(result_text)
+        # API 과부하 차단 방지 버퍼
+        time.sleep(1.5) 
+        
+        response = model.generate_content(prompt, safety_settings=safety_settings)
+        raw_text = response.text.strip()
+        
+        translated_title = ""
+        comment = ""
+        
+        # 텍스트 안전 파싱
+        for line in raw_text.split('\n'):
+            line = line.strip()
+            if line.startswith("번역제목:"):
+                translated_title = line.replace("번역제목:", "").strip(" []\"'")
+            elif line.startswith("요약내용:"):
+                comment = line.replace("요약내용:", "").strip(" []\"'")
+                
+        # 한글 검증 2차 방어선 (영문 그대로 출력 시 강제 재요청)
+        if not translated_title or not re.search(r'[가-힣]', translated_title):
+            time.sleep(1.0) 
+            backup_model = genai.GenerativeModel('gemini-2.0-flash')
+            backup_prompt = f"다음 의학 논문 제목을 무조건 한국어(한글)로만 번역하세요. 부가 설명 없이 한글 제목만 출력하세요:\n{title}"
+            backup_res = backup_model.generate_content(backup_prompt, safety_settings=safety_settings)
+            translated_title = backup_res.text.strip(" \n\"'[]")
+            
+        return {
+            "translated_title": translated_title if translated_title else title,
+            "comment": comment if comment else "요약 실패"
+        }
     except Exception as e:
-        return {"translated_title": title, "comment": "분석 처리 중 오류가 발생하여 원문으로 대체합니다."}
+        error_msg = str(e)
+        if "429" in error_msg or "Quota" in error_msg or "exhausted" in error_msg.lower():
+            return {"translated_title": "⚠️ API 한도 초과", "comment": "1분당 API 호출 제한(15건)에 도달했습니다. 1~2분 뒤 다시 시도해주세요."}
+        else:
+            return {"translated_title": "분석 오류", "comment": f"에러 원인: {error_msg[:40]}"}
 
 # --- 사이드바 ---
 with st.sidebar:
@@ -102,7 +142,7 @@ if st.button("🚀 분석 시작", type="primary"):
             papers = search_pubmed(item['eng'], days=7 if selected_period=="최근 일주일" else 30, max_results=9)
             search_results.append({'item': item, 'papers': papers})
 
-    # [핵심 기능] 고유 고유 PMID 기준 논문 중복 제거 및 검색 매핑
+    # [핵심 기능] 고유 PMID 기준 논문 중복 제거 및 검색 매핑
     pmid_to_paper = {}
     pmid_to_keywords = {}
     
