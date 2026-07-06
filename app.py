@@ -46,16 +46,14 @@ def search_pubmed(keyword, days=7, max_results=9):
         return papers
     except: return []
 
-# --- AI 분석 함수 (초기 성공 버전 프롬프트 및 파싱 로직 복원) ---
+# --- AI 분석 함수 (초기 성공 버전 프롬프트 및 가공 로직 복원) ---
 def analyze_paper_with_gemini(api_key, title, abstract, product_name):
     if not abstract:
         return {"translated_title": "분석 불가", "comment": "Abstract 미등록에 따른 분석 불가"}
     
     genai.configure(api_key=api_key)
-    # 초기에 가장 잘 돌아갔던 2.5-flash 모델로 세팅합니다.
     model = genai.GenerativeModel('gemini-2.5-flash')
     
-    # 초기에 성공했던 오리지널 프롬프트 구조 그대로 복원
     prompt = f"""
     당신은 제약 바이오 학술 전문가입니다. 다음 논문의 제목과 초록을 읽고, 자사 품목인 '{product_name}'과의 연관성을 분석해주세요.
     논문 제목: {title}
@@ -68,15 +66,11 @@ def analyze_paper_with_gemini(api_key, title, abstract, product_name):
     }}
     """
     try:
-        # 무차별 다량 호출로 인한 API 차단(429 에러) 방지용 안심 버퍼
-        time.sleep(1.5)
-        
+        time.sleep(1.5) # 과부하 방지 안심 버퍼
         response = model.generate_content(prompt)
-        # 초기에 성공했던 문자열 치환 가공 처리 방식 복원
         result_text = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(result_text)
     except Exception as e:
-        # 오류 발생 시 시스템이 멈추지 않도록 안전하게 원문 매핑
         return {"translated_title": title, "comment": "분석 처리 중 오류가 발생하여 원문으로 대체합니다."}
 
 # --- 사이드바 ---
@@ -108,16 +102,55 @@ if st.button("🚀 분석 시작", type="primary"):
             papers = search_pubmed(item['eng'], days=7 if selected_period=="최근 일주일" else 30, max_results=9)
             search_results.append({'item': item, 'papers': papers})
 
-    # 0건 제거 및 건수 많은 순 정렬 시스템 유지
-    active_results = sorted([res for res in search_results if len(res['papers']) > 0], key=lambda x: len(x['papers']), reverse=True)
+    # [핵심 기능] 고유 고유 PMID 기준 논문 중복 제거 및 검색 매핑
+    pmid_to_paper = {}
+    pmid_to_keywords = {}
+    
+    for res in search_results:
+        item = res['item']
+        for paper in res['papers']:
+            pmid = paper['pmid']
+            if pmid not in pmid_to_paper:
+                pmid_to_paper[pmid] = paper
+            if pmid not in pmid_to_keywords:
+                pmid_to_keywords[pmid] = []
+            pmid_to_keywords[pmid].append(item)
+            
+    # 동일한 키워드 세트를 가진 논문끼리 완벽 그룹화
+    from collections import defaultdict
+    combo_groups = defaultdict(list)
+    
+    for pmid, keywords in pmid_to_keywords.items():
+        sorted_keywords = sorted(keywords, key=lambda x: x['kor'])
+        combo_key = tuple(k['kor'] for k in sorted_keywords)
+        combo_groups[combo_key].append((pmid, sorted_keywords))
+        
+    # 출력 구조용 데이터 가공
+    processed_groups = []
+    for combo_key, paper_list in combo_groups.items():
+        papers_in_group = [pmid_to_paper[pmid] for pmid, _ in paper_list]
+        sorted_items = paper_list[0][1]
+        
+        # 중첩 키워드 명칭 연결 (예: A키워드 & B키워드)
+        kor_title = " & ".join([k['kor'] for k in sorted_items])
+        eng_title = " & ".join([k['eng'] for k in sorted_items])
+        
+        processed_groups.append({
+            'kor_title': kor_title,
+            'eng_title': eng_title,
+            'papers': papers_in_group,
+            'overlap_count': len(sorted_items)
+        })
+        
+    # 정렬 기준 우선순위: 1단계 - 중첩 키워드 개수가 많을수록 상단 배치 / 2단계 - 동률일 경우 논문 개수가 많을수록 상단
+    active_results = sorted(processed_groups, key=lambda x: (x['overlap_count'], len(x['papers'])), reverse=True)
 
     if not active_results: st.info("업데이트된 논문이 없습니다.")
     else:
         st.subheader("📈 논문 업데이트 현황")
         for res in active_results:
-            # 외부 파일 아이콘 옆에는 한국어 키워드 유지
-            with st.expander(f"📂 {res['item']['kor']} ({len(res['papers'])}건)"):
-                # 가로 3열 배치 시스템 유지
+            # 파일 아이콘 옆 배치: 한국어 조합 이름 적용
+            with st.expander(f"📂 {res['kor_title']} ({len(res['papers'])}건)"):
                 for i in range(0, len(res['papers']), 3):
                     row_papers = res['papers'][i : i + 3]
                     cols = st.columns(3)
@@ -126,8 +159,8 @@ if st.button("🚀 분석 시작", type="primary"):
                             with st.container(border=True):
                                 analysis = analyze_paper_with_gemini(gemini_key, paper['title'], paper['abstract'], selected_product)
                                 
-                                # 문헌 종류 옆 배지 내부에는 영어 키워드 출력 유지
-                                st.markdown(f"**[{paper['pub_type']}]** <span style='background-color:#d1ecf1; color:#0c5460; padding:3px 8px; border-radius:5px; font-size:0.85em; font-weight:bold;'>{res['item']['eng']}</span>", unsafe_allow_html=True)
+                                # 문헌 종류 옆 태그 내부 배치: 영어 조합 이름 적용 (구조/디자인 불변)
+                                st.markdown(f"**[{paper['pub_type']}]** <span style='background-color:#d1ecf1; color:#0c5460; padding:3px 8px; border-radius:5px; font-size:0.85em; font-weight:bold;'>{res['eng_title']}</span>", unsafe_allow_html=True)
                                 st.markdown(f"**{paper['title']}** [[🔗PubMed]](https://pubmed.ncbi.nlm.nih.gov/{paper['pmid']}/)")
                                 st.markdown("---")
                                 st.markdown(f"🔖 {analysis.get('translated_title')}")
